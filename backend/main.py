@@ -32,12 +32,18 @@ app = FastAPI(
     version="1.0.0",
 )
 
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "").strip().rstrip("/")
+
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+if FRONTEND_ORIGIN:
+    allowed_origins.append(FRONTEND_ORIGIN)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
@@ -287,8 +293,26 @@ def get_current_admin(
 # DATABASE SETUP AND MIGRATION
 # ==================================================
 
-def ensure_citizen_table():
+def ensure_database_schema():
+    """
+    Create the application's database tables in foreign-key dependency order.
+    Safe to run repeatedly: existing tables are not recreated.
+    """
     with engine.begin() as connection:
+        # 1. Administrators are referenced by complaint status history.
+        connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS admin_users (
+                id BIGSERIAL PRIMARY KEY,
+                full_name VARCHAR(150) NOT NULL,
+                username VARCHAR(100) NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role VARCHAR(30) NOT NULL DEFAULT 'admin',
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+
+        # 2. Citizens are referenced by complaints.
         connection.execute(text("""
             CREATE TABLE IF NOT EXISTS citizens (
                 id BIGSERIAL PRIMARY KEY,
@@ -299,31 +323,58 @@ def ensure_citizen_table():
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """))
-
         connection.execute(text("""
             ALTER TABLE citizens
-            ADD COLUMN IF NOT EXISTS is_active
-            BOOLEAN NOT NULL DEFAULT TRUE
+            ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE
         """))
-
         connection.execute(text("""
             ALTER TABLE citizens
-            ADD COLUMN IF NOT EXISTS created_at
-            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         """))
 
-        # New complaints will reference their submitting citizen.
-        # Existing records remain unassigned until their owners are verified.
+        # 3. Complaints are referenced by complaint_status_history.
+        connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS complaints (
+                id BIGSERIAL PRIMARY KEY,
+                tracking_code VARCHAR(30) NOT NULL UNIQUE,
+                citizen_id BIGINT REFERENCES citizens(id) ON DELETE SET NULL,
+                category VARCHAR(100) NOT NULL,
+                subject VARCHAR(200) NOT NULL,
+                description TEXT NOT NULL,
+                village VARCHAR(150) NOT NULL DEFAULT 'Puttapaka',
+                location_details VARCHAR(500),
+                status VARCHAR(30) NOT NULL DEFAULT 'submitted',
+                submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+
+        # Migration for an existing complaints table created before citizen ownership.
         connection.execute(text("""
             ALTER TABLE complaints
             ADD COLUMN IF NOT EXISTS citizen_id BIGINT
             REFERENCES citizens(id) ON DELETE SET NULL
         """))
 
+        # 4. History rows reference both complaints and (optionally) admins.
+        connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS complaint_status_history (
+                id BIGSERIAL PRIMARY KEY,
+                complaint_id BIGINT NOT NULL
+                    REFERENCES complaints(id) ON DELETE CASCADE,
+                old_status VARCHAR(30),
+                new_status VARCHAR(30) NOT NULL,
+                changed_by_admin BIGINT
+                    REFERENCES admin_users(id) ON DELETE SET NULL,
+                remarks TEXT NOT NULL,
+                changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+
 
 @app.on_event("startup")
 def startup_database_setup():
-    ensure_citizen_table()
+    ensure_database_schema()
 
 
 # ==================================================
