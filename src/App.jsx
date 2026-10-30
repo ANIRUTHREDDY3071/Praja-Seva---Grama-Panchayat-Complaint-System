@@ -626,7 +626,7 @@ function NewComplaintPage() {
 
     try {
       const response = await fetch(
-        "http://127.0.0.1:8000/complaints",
+        `${API_BASE_URL}/complaints`,
         {
           method: "POST",
           headers: {
@@ -906,7 +906,7 @@ function TrackComplaintPage() {
 
     try {
       const response = await fetch(
-        `http://127.0.0.1:8000/complaints/${encodeURIComponent(
+        `${API_BASE_URL}/complaints/${encodeURIComponent(
           trackingCode
         )}`
       );
