@@ -289,92 +289,170 @@ def get_current_admin(
         )
 
 
+
 # ==================================================
 # DATABASE SETUP AND MIGRATION
 # ==================================================
 
+import logging
+
+logger = logging.getLogger("prajaseva.database")
+
+
 def ensure_database_schema():
     """
-    Create the application's database tables in foreign-key dependency order.
-    Safe to run repeatedly: existing tables are not recreated.
+    Create application tables in dependency order.
+    Verify that the expected tables exist after creation.
     """
-    with engine.begin() as connection:
-        # 1. Administrators are referenced by complaint status history.
-        connection.execute(text("""
-            CREATE TABLE IF NOT EXISTS admin_users (
-                id BIGSERIAL PRIMARY KEY,
-                full_name VARCHAR(150) NOT NULL,
-                username VARCHAR(100) NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                role VARCHAR(30) NOT NULL DEFAULT 'admin',
-                is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """))
 
-        # 2. Citizens are referenced by complaints.
-        connection.execute(text("""
-            CREATE TABLE IF NOT EXISTS citizens (
-                id BIGSERIAL PRIMARY KEY,
-                full_name VARCHAR(150) NOT NULL,
-                mobile VARCHAR(10) NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """))
-        connection.execute(text("""
-            ALTER TABLE citizens
-            ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE
-        """))
-        connection.execute(text("""
-            ALTER TABLE citizens
-            ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        """))
+    expected_tables = {
+        "admin_users",
+        "citizens",
+        "complaints",
+        "complaint_status_history",
+    }
 
-        # 3. Complaints are referenced by complaint_status_history.
-        connection.execute(text("""
-            CREATE TABLE IF NOT EXISTS complaints (
-                id BIGSERIAL PRIMARY KEY,
-                tracking_code VARCHAR(30) NOT NULL UNIQUE,
-                citizen_id BIGINT REFERENCES citizens(id) ON DELETE SET NULL,
-                category VARCHAR(100) NOT NULL,
-                subject VARCHAR(200) NOT NULL,
-                description TEXT NOT NULL,
-                village VARCHAR(150) NOT NULL DEFAULT 'Puttapaka',
-                location_details VARCHAR(500),
-                status VARCHAR(30) NOT NULL DEFAULT 'submitted',
-                submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """))
+    try:
+        with engine.begin() as connection:
 
-        # Migration for an existing complaints table created before citizen ownership.
-        connection.execute(text("""
-            ALTER TABLE complaints
-            ADD COLUMN IF NOT EXISTS citizen_id BIGINT
-            REFERENCES citizens(id) ON DELETE SET NULL
-        """))
+            # Log the actual database connection context.
+            db_info = connection.execute(text("""
+                SELECT
+                    current_database() AS database_name,
+                    current_schema() AS schema_name,
+                    current_user AS database_user
+            """)).mappings().one()
 
-        # 4. History rows reference both complaints and (optionally) admins.
-        connection.execute(text("""
-            CREATE TABLE IF NOT EXISTS complaint_status_history (
-                id BIGSERIAL PRIMARY KEY,
-                complaint_id BIGINT NOT NULL
-                    REFERENCES complaints(id) ON DELETE CASCADE,
-                old_status VARCHAR(30),
-                new_status VARCHAR(30) NOT NULL,
-                changed_by_admin BIGINT
-                    REFERENCES admin_users(id) ON DELETE SET NULL,
-                remarks TEXT NOT NULL,
-                changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            logger.info(
+                "Database connected: database=%s schema=%s user=%s",
+                db_info["database_name"],
+                db_info["schema_name"],
+                db_info["database_user"],
             )
-        """))
+
+            # 1. Admin users
+            connection.execute(text("""
+                CREATE TABLE IF NOT EXISTS public.admin_users (
+                    id BIGSERIAL PRIMARY KEY,
+                    full_name VARCHAR(150) NOT NULL,
+                    username VARCHAR(100) NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role VARCHAR(30) NOT NULL DEFAULT 'admin',
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+
+            # 2. Citizens
+            connection.execute(text("""
+                CREATE TABLE IF NOT EXISTS public.citizens (
+                    id BIGSERIAL PRIMARY KEY,
+                    full_name VARCHAR(150) NOT NULL,
+                    mobile VARCHAR(10) NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+
+            connection.execute(text("""
+                ALTER TABLE public.citizens
+                ADD COLUMN IF NOT EXISTS is_active
+                BOOLEAN NOT NULL DEFAULT TRUE
+            """))
+
+            connection.execute(text("""
+                ALTER TABLE public.citizens
+                ADD COLUMN IF NOT EXISTS created_at
+                TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            """))
+
+            # 3. Complaints
+            connection.execute(text("""
+                CREATE TABLE IF NOT EXISTS public.complaints (
+                    id BIGSERIAL PRIMARY KEY,
+                    tracking_code VARCHAR(30) NOT NULL UNIQUE,
+                    citizen_id BIGINT
+                        REFERENCES public.citizens(id)
+                        ON DELETE SET NULL,
+                    category VARCHAR(100) NOT NULL,
+                    subject VARCHAR(200) NOT NULL,
+                    description TEXT NOT NULL,
+                    village VARCHAR(150) NOT NULL DEFAULT 'Puttapaka',
+                    location_details VARCHAR(500),
+                    status VARCHAR(30) NOT NULL DEFAULT 'submitted',
+                    submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+
+            # Migration for existing complaints tables.
+            connection.execute(text("""
+                ALTER TABLE public.complaints
+                ADD COLUMN IF NOT EXISTS citizen_id BIGINT
+                REFERENCES public.citizens(id)
+                ON DELETE SET NULL
+            """))
+
+            # 4. Complaint status history
+            connection.execute(text("""
+                CREATE TABLE IF NOT EXISTS
+                public.complaint_status_history (
+                    id BIGSERIAL PRIMARY KEY,
+                    complaint_id BIGINT NOT NULL
+                        REFERENCES public.complaints(id)
+                        ON DELETE CASCADE,
+                    old_status VARCHAR(30),
+                    new_status VARCHAR(30) NOT NULL,
+                    changed_by_admin BIGINT
+                        REFERENCES public.admin_users(id)
+                        ON DELETE SET NULL,
+                    remarks TEXT NOT NULL,
+                    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+
+            # Verify tables inside the same database transaction.
+            result = connection.execute(text("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_type = 'BASE TABLE'
+                  AND table_name IN (
+                      'admin_users',
+                      'citizens',
+                      'complaints',
+                      'complaint_status_history'
+                  )
+            """))
+
+            existing_tables = {
+                row[0] for row in result.fetchall()
+            }
+
+            missing_tables = expected_tables - existing_tables
+
+            if missing_tables:
+                raise RuntimeError(
+                    "Database initialization incomplete. "
+                    f"Missing tables: {sorted(missing_tables)}"
+                )
+
+            logger.info(
+                "Database schema verified successfully. Tables: %s",
+                sorted(existing_tables),
+            )
+
+    except Exception:
+        logger.exception("Prajaseva database initialization failed.")
+        raise
 
 
 @app.on_event("startup")
 def startup_database_setup():
+    logger.info("Starting Prajaseva database initialization...")
     ensure_database_schema()
+    logger.info("Prajaseva database initialization completed.")
 
 
 # ==================================================
@@ -705,19 +783,7 @@ def admin_login(credentials: AdminLogin):
                 {"username": credentials.username.strip()},
             ).mappings().one_or_none()
 
-        print("LOGIN DEBUG - username:", repr(credentials.username.strip()))
-        print("LOGIN DEBUG - admin found:", admin is not None)
-
-        if admin is not None:
-            print("LOGIN DEBUG - role:", repr(admin["role"]))
-            print("LOGIN DEBUG - active:", repr(admin["is_active"]))
-            print(
-                "LOGIN DEBUG - password matches:",
-                password_hasher.verify(
-                credentials.password,
-                admin["password_hash"],
-               ),
-        )
+        
 
         if (
             admin is None
@@ -772,21 +838,70 @@ def root():
     }
 
 
+
 @app.get("/health")
 def health():
+    required_tables = {
+        "admin_users",
+        "citizens",
+        "complaints",
+        "complaint_status_history",
+    }
+
     try:
         with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
+            db_info = connection.execute(text("""
+                SELECT
+                    current_database() AS database_name,
+                    current_schema() AS schema_name
+            """)).mappings().one()
+
+            result = connection.execute(text("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_type = 'BASE TABLE'
+                  AND table_name IN (
+                      'admin_users',
+                      'citizens',
+                      'complaints',
+                      'complaint_status_history'
+                  )
+            """))
+
+            existing_tables = {
+                row[0] for row in result.fetchall()
+            }
+
+            missing_tables = sorted(
+                required_tables - existing_tables
+            )
+
+        if missing_tables:
+            return {
+                "api": "healthy",
+                "database": "connected",
+                "schema": "incomplete",
+                "missing_tables": missing_tables,
+                "database_name": db_info["database_name"],
+                "schema_name": db_info["schema_name"],
+            }
 
         return {
             "api": "healthy",
             "database": "connected",
+            "schema": "ready",
+            "tables": sorted(existing_tables),
+            "database_name": db_info["database_name"],
+            "schema_name": db_info["schema_name"],
         }
 
     except SQLAlchemyError:
+        logger.exception("Health check database failure.")
+
         raise HTTPException(
             status_code=503,
-            detail="Database connection failed.",
+            detail="Database health check failed.",
         )
 
 
