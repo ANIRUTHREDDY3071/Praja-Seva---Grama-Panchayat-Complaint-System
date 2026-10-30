@@ -705,6 +705,20 @@ def admin_login(credentials: AdminLogin):
                 {"username": credentials.username.strip()},
             ).mappings().one_or_none()
 
+        print("LOGIN DEBUG - username:", repr(credentials.username.strip()))
+        print("LOGIN DEBUG - admin found:", admin is not None)
+
+        if admin is not None:
+            print("LOGIN DEBUG - role:", repr(admin["role"]))
+            print("LOGIN DEBUG - active:", repr(admin["is_active"]))
+            print(
+                "LOGIN DEBUG - password matches:",
+                password_hasher.verify(
+                credentials.password,
+                admin["password_hash"],
+               ),
+        )
+
         if (
             admin is None
             or not password_hasher.verify(
